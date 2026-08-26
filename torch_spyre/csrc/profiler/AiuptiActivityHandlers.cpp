@@ -174,6 +174,12 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuIssueCallback";
     case AIUPTI_RUNTIME_TRACE_CBID_VERIFY_ASYC_MSGS:
       return "aiuVerifyAsyncMsgs";
+    case AIUPTI_RUNTIME_TRACE_CBID_CMPT_EXEC:
+      return "aiuCmptExec";
+    case AIUPTI_RUNTIME_TRACE_CBID_DMAI_EXEC:
+      return "aiuDmaIExec";
+    case AIUPTI_RUNTIME_TRACE_CBID_DMAO_EXEC:
+      return "aiuDmaOExec";
     default:
       break;
   }
