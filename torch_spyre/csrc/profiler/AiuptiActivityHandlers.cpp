@@ -18,6 +18,7 @@
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <nlohmann/json.hpp>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -84,6 +85,102 @@ const libkineto::ITraceActivity* AiuptiActivityProfilerSession::linkedActivity(
   if (it != correlationMap.end()) return cpuActivity_(it->second);
   return nullptr;
 }
+
+// Mirrors CollMetadata / extractCollMetadata in flex
+// flex/src/runtime_stream/1p0/pf_runtime_scheduler_utils.cpp:199-265.
+// Keep the pattern list and its order in sync with that function.
+struct CollMetadata {
+  std::string coll_group;
+  std::string coll_algo;
+  std::string coll_bytes;
+};
+
+inline CollMetadata extractCollMetadata(const std::string& cb_name) {
+  std::smatch base_match;
+
+  // 1. Spyre-comms structured format: "[CollType,Algorithm,Bytes] ..."
+  static const std::regex structured_regex(
+      "^\\[([^,\\]]+),([^,\\]]+),([^,\\]]+)\\]");
+  if (std::regex_search(cb_name, base_match, structured_regex) &&
+      base_match.size() > 3)
+    return {base_match[1], base_match[2], base_match[3]};
+
+  // 2. Legacy inductor-generated names: only coll_group is extractable.
+  // e.g. "AllGather_mean_0" -> coll_group="AllGather_mean_0"
+  static const std::regex all_gather_mean_regex("(AllGather_mean(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, all_gather_mean_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // e.g. "AllGather_add_1" -> coll_group="AllGather_add_1"
+  static const std::regex all_gather_add_regex("(AllGather_add(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, all_gather_add_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // e.g. "AllGather_all_reduce_2" -> coll_group="AllGather_all_reduce_2"
+  static const std::regex all_gather_all_reduce_regex(
+      "(AllGather_all_reduce(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, all_gather_all_reduce_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // e.g. "AllGather_all_gather_into_tensor_0"
+  //      -> coll_group="AllGather_all_gather_into_tensor_0"
+  static const std::regex all_gather_into_tensor_regex(
+      "(AllGather_all_gather_into_tensor(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, all_gather_into_tensor_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // 3. Sync-prefixed names from runtime sync operations.
+  // e.g. "sync=all_gather_into_tensor_0" -> coll_group="all_gather_into_tensor_0"
+  static const std::regex sync_all_gather_into_tensor_regex(
+      "sync=(all_gather_into_tensor(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match,
+                        sync_all_gather_into_tensor_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // e.g. "AllReduce_all_reduce_1" -> coll_group="AllReduce_all_reduce_1"
+  static const std::regex all_reduce_all_reduce_regex(
+      "(AllReduce_all_reduce(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, all_reduce_all_reduce_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // e.g. "sync=all_reduce_0" -> coll_group="all_reduce_0"
+  static const std::regex sync_all_reduce_regex("sync=(all_reduce(_\\d+)*)");
+  if (std::regex_search(cb_name, base_match, sync_all_reduce_regex) &&
+      base_match.size() > 1)
+    return {base_match[1], "", ""};
+
+  // 4. Spyre-comms legacy collective patterns: "Allreduce Send", etc.
+  //    Matches the collective type prefix (with optional Selfless/V suffix).
+  static const std::regex legacy_coll_regex(
+      "(ReduceScatter|Allreduce|Allgather|AllToAll|Broadcast|Scatter|Gather|"
+      "Reduce)(?:Selfless|V)?");
+  if (std::regex_search(cb_name, base_match, legacy_coll_regex) &&
+      base_match.size() > 0)
+    return {base_match[0], "", ""};
+
+  return {"", "", ""};
+}
+
+template <class ActivityPtr>
+inline void addCollMetadata(ActivityPtr& act, const char* cb_name) {
+  const auto coll = extractCollMetadata(cb_name);
+  if (coll.coll_group.empty()) return;
+  act->addMetadataQuoted("CollGroup", coll.coll_group);
+  // DEBUG: emit "empty" rather than omitting the key, so a trace distinguishes
+  // "parser ran, field genuinely empty" from "addCollMetadata never fired".
+  // Revert CollBytes to plain addMetadata (unquoted number) once done probing.
+  act->addMetadataQuoted("CollAlgo",
+                         coll.coll_algo.empty() ? "empty" : coll.coll_algo);
+  act->addMetadataQuoted("CollBytes",
+                         coll.coll_bytes.empty() ? "empty" : coll.coll_bytes);
+}
+
 
 template <class ze_handle_type>
 inline std::string handleToHexString(ze_handle_type handle) {
@@ -286,6 +383,12 @@ void AiuptiActivityProfilerSession::handleKernelActivity(
     }
   }
 
+  // A kernel row is always an AIUPTI_ACTIVITY_KIND_CMPT record (see
+  // handlePtiActivity dispatch); operation_kind distinguishes PREP from EXEC.
+  kernel_activity->addMetadataQuoted("pipeline", "COMPUTE");
+  kernel_activity->addMetadata("operation_kind", activity->operation_kind);
+  addCollMetadata(kernel_activity, activity->name);
+
   recordStream(kernel_activity->device, kernel_activity->resource);
 
   // checkTimestampOrder(&*kernel_activity);
@@ -318,6 +421,22 @@ inline std::string memoryCopyOperationName(uint8_t kind) {
       break;
   }
   return "<unknown>";
+}
+
+// flex PipelineId: COMPUTE=1, ASYNC_DMAI=2, ASYNC_DMAO=3 (0 = unset/unknown).
+// copy_kind only records transfer direction, so the pipeline is carried
+// separately on the record and surfaced here to identify CMPT/DMAI/DMAO.
+inline std::string pipelineName(uint8_t pipeline) {
+  switch (pipeline) {
+    case 1:
+      return "COMPUTE";
+    case 2:
+      return "ASYNC_DMAI";
+    case 3:
+      return "ASYNC_DMAO";
+    default:
+      return "<unknown>";
+  }
 }
 
 inline uint32_t getBaseResourceId(const AIUpti_ActivityMemcpy* activity) {
@@ -399,6 +518,10 @@ void AiuptiActivityProfilerSession::handleMemcpyActivity(
   memcpy_activity->addMetadata("memory operation id", activity->copy_kind);
   memcpy_activity->addMetadata("bytes", activity->bytes);
   memcpy_activity->addMetadata("memory bandwidth (GB/s)", bandwidth(activity));
+  memcpy_activity->addMetadataQuoted("pipeline",
+                                     pipelineName(activity->pipeline));
+  memcpy_activity->addMetadataQuoted("cb_name", activity->name);
+  addCollMetadata(memcpy_activity, activity->name);
 
   if (memcpy_activity->resource == getBaseResourceId(activity)) {
     recordMemoryStream(memcpy_activity->device, memcpy_activity->resource,
