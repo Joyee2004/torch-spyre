@@ -22,7 +22,6 @@ from typing import Any
 
 import sympy
 
-from . import config
 from .logging_utils import get_inductor_logger
 
 from torch._inductor.dependencies import MemoryDep
@@ -34,7 +33,11 @@ from torch._inductor.ir import (
 )
 from torch._inductor.virtualized import V
 from torch_spyre._C import SpyreTensorLayout
-from .pass_utils import compute_restickify_needed, device_coordinates, host_coordinates
+from .pass_utils import (
+    compute_restickify_needed,
+    device_coordinates,
+    host_coordinates,
+)
 
 INF = math.inf
 
@@ -202,7 +205,16 @@ class AllSameNode(RestickNodeCost):
         ]
         output_edge_costs = [
             EdgeCostMap(
-                dep, V.graph.get_buffer(dep.name).layouts, out_layouts, out_dep, op
+                dep,
+                # Always non-empty: SpyreEmptyFallback.layouts is set by the
+                # SpyreEmptyFallback branch in propagate_layouts before any
+                # mutation writer is processed (topo order guarantee). An empty
+                # list here would cause min_input_cost to return INF for all
+                # beam states with no useful error message.
+                getattr(V.graph.get_buffer(dep.name), "layouts", []),
+                out_layouts,
+                out_dep,
+                op,
             )
             for dep in co_output_deps
         ]
@@ -211,13 +223,27 @@ class AllSameNode(RestickNodeCost):
     def __init__(self, input_edge_costs: list, output_edge_costs: "list | None" = None):
         super().__init__(input_edge_costs + (output_edge_costs or []))
         self._input_edge_costs = input_edge_costs
+        self._output_edge_costs = output_edge_costs or []
 
     def cost(
         self, in_layouts: "list[SpyreTensorLayout]", out_stl: "SpyreTensorLayout"
     ) -> float:
-        # edge_costs includes both input and co-output edges; co-output entries enforce
-        # layout equality (0 if matching, INF if not) but never trigger restickify insertion.
-        return sum(ec.cost(lk, out_stl) for ec, lk in zip(self.edge_costs, in_layouts))
+        input_cost = sum(
+            ec.cost(lk, out_stl)
+            for ec, lk in zip(
+                self._input_edge_costs, in_layouts[: len(self._input_edge_costs)]
+            )
+        )
+        if input_cost >= INF:
+            return INF
+        # Co-output edges: the shared buffer must have the exact same STL as this op's
+        # output. Any mismatch means two mutation ops write the same buffer with different
+        # layouts, which is always wrong — cost INF, not a restickify.
+        co_offset = len(self._input_edge_costs)
+        for ec, lk in zip(self._output_edge_costs, in_layouts[co_offset:]):
+            if lk is not None and lk != out_stl:
+                return INF
+        return input_cost
 
     def required_input_stls(self, out_stl):
         return [(ec, out_stl) for ec in self._input_edge_costs]
@@ -393,66 +419,6 @@ def _no_feasible_layout_error(op) -> NotImplementedError:
     return NotImplementedError("\n".join(lines))
 
 
-def greedy_local_min_cost(operations: list) -> None:
-    """Greedy layout selection: process ops in topological order, picking the output layout with minimum local restick cost.
-
-    On cost ties, the first candidate layout (leftmost arg's stick) is chosen. Each op's chosen
-    layout is committed immediately so downstream ops can read it.
-    """
-
-    # Process graph inputs first so all upstreams have committed_stl.
-    # For now inputs are always a set of size 1, since we use it as it
-    # was transferred to device
-    for name in V.graph.graph_input_names:
-        tb = V.graph.graph_inputs[name]
-        if (
-            isinstance(tb, TensorBox)
-            and isinstance(tb.data, StorageBox)
-            and isinstance(tb.data.data, InputBuffer)
-            and hasattr(tb, "layouts")
-        ):
-            if not tb.layouts:
-                raise AssertionError(f"graph input {name} has empty layouts set")
-            stl = next(iter(tb.layouts))
-            tb.data.data.committed_stl = stl
-            tb.committed_stl = stl
-
-    for op in operations:
-        if not hasattr(op, "layouts"):
-            continue  # FallbackKernel and other unhandled op types
-
-        assert hasattr(op, "restick_cost_fn"), (
-            f"op {op.get_name()} has layouts but no restick_cost_fn"
-        )
-        cost_fn = op.restick_cost_fn
-
-        # Collect each input arg's committed layout (finalized by earlier topo iterations).
-        in_layouts = []
-        for ec in cost_fn.edge_costs:
-            buf = V.graph.get_buffer(ec.dep.name)
-            assert hasattr(buf, "committed_stl"), (
-                f"buffer {ec.dep.name} has no committed_stl — "
-                "topological order violated or input not committed"
-            )
-            in_layouts.append(buf.committed_stl)
-
-        assert op.layouts, (
-            f"op {op.get_name()} has restick_cost_fn but no candidate output layouts"
-        )
-        out_stl = None
-        best_cost = float("inf")
-        for candidate_stl in op.layouts:
-            out_layout_cost = cost_fn.cost(in_layouts, candidate_stl)
-            if out_layout_cost < best_cost:
-                best_cost = out_layout_cost
-                out_stl = candidate_stl
-
-        if out_stl is None:
-            raise _no_feasible_layout_error(op)
-
-        op.committed_stl = out_stl
-
-
 # Global Stick Optimizer
 #
 # The global optimizer is a simple forward-propagation algorithm that tracks a frontier of possible
@@ -528,6 +494,66 @@ class Frontier:
                 len(self.states),
                 self.K,
             )
+
+
+def _reorder_any_in_nodes(operations: list) -> list:
+    """Move AnyInNode ops to just before their first consumer.
+
+    AnyInNode ops (e.g. SpyreEmptyFallback) have no inputs and impose no
+    upstream constraints. Committing their layout early causes speculative
+    branching that persists until their consumer is reached — potentially
+    across many beam steps, blowing up the state count. Moving them to just
+    before their first consumer means the branch is immediately resolved by
+    the consumer's cost function, eliminating the blowup.
+    """
+    # For each AnyInNode op, find the position of its first consumer.
+    to_move: dict[int, int] = {}  # old_pos -> insert_before_pos
+    for i, op in enumerate(operations):
+        if not hasattr(op, "layouts"):
+            continue
+        if not isinstance(op.restick_cost_fn, AnyInNode):
+            continue
+        name = op.get_name()
+        first_consumer_pos = None
+        for j, other in enumerate(operations):
+            if j <= i:
+                continue
+            if not hasattr(other, "layouts"):
+                continue
+            # NOTE: AnyInNode.edge_costs is always [], so an AnyInNode op can
+            # never appear as a consumer here. In practice SpyreEmptyFallback
+            # (the only current AnyInNode user) has no inputs and cannot consume
+            # another SpyreEmptyFallback, so chained AnyInNode ops cannot occur.
+            # If new AnyInNode users are added, generalize this into a dedicated
+            # reorder pass that handles chained AnyInNode ops.
+            # NOTE: This is O(k·n) where k is the number of AnyInNode ops.
+            # Since SpyreEmptyFallback buffers are rare, this is effectively O(n).
+            if any(ec.dep.name == name for ec in other.restick_cost_fn.edge_costs):
+                first_consumer_pos = j
+                break
+        if first_consumer_pos is not None and first_consumer_pos > i + 1:
+            to_move[i] = first_consumer_pos
+
+    if not to_move:
+        return operations
+
+    # Build reordered list: skip moved ops in original positions, insert at target.
+    moved_ops = {i: operations[i] for i in to_move}
+    result = []
+    for i, op in enumerate(operations):
+        if i in to_move:
+            continue
+        # Insert any ops whose target position is here (i.e. just before this op).
+        for old_pos, insert_before in sorted(to_move.items()):
+            if insert_before == i:
+                result.append(moved_ops[old_pos])
+        result.append(op)
+    # Handle any ops targeted past the end.
+    for old_pos, insert_before in sorted(to_move.items()):
+        if insert_before >= len(operations):
+            result.append(moved_ops[old_pos])
+
+    return result
 
 
 def compute_future_min_cost(
@@ -617,6 +643,17 @@ def beam_global_min_cost(operations: list) -> None:
 
     At the end, the best state's assignments are committed to the ops.
     """
+    operations = _reorder_any_in_nodes(operations)
+    # NOTE: compute_future_min_cost and _compute_last_use both iterate over
+    # op.restick_cost_fn.edge_costs, which on AllSameNode includes co-output
+    # EdgeCostMap entries (the SpyreEmptyFallback buffer dep). This means each
+    # mutation writer appears as a "downstream consumer" of the fallback in the
+    # future-cost and last-use maps. This is safe in practice: co-output edges
+    # have zero cost when STLs match, and SpyreEmptyFallback has all valid STLs
+    # as candidates, so the future-min-cost estimate is never pessimistic in a
+    # way that causes incorrect pruning. Last-use liveness is also correct — the
+    # fallback should stay live until its last writer. A cleaner fix would
+    # exclude co-output deps from the base class edge_costs; cleanup is coming.
     future_min_cost = compute_future_min_cost(operations)
 
     step_of: dict[str, int] = {}
@@ -695,6 +732,10 @@ def beam_global_min_cost(operations: list) -> None:
 
         # Liveness merge: keep only the lowest-lower_bound state per live-slot key.
         # Absent from last_use = graph output; treated as dead (cost already sunk).
+        # Co-output slots written by this op are kept live in the key so that states
+        # where those slots differ are not incorrectly merged: each expansion of this
+        # op writes co_output[i] = committed_stl, and we must preserve those distinct
+        # values across states until the beam can prune the dominated ones.
         live_indices = frozenset(
             i
             for i, name in enumerate(frontier.buf_names)
@@ -756,9 +797,5 @@ def beam_global_min_cost(operations: list) -> None:
 def optimize_restickify_locations(graph: GraphLowering) -> None:
     """Select restickify locations for all ops, minimizing total restickify cost."""
     operations = graph.operations
-    if config.global_stick_optimizer:
-        logger.info("optimizer: beam (global)")
-        beam_global_min_cost(operations)
-    else:
-        logger.info("optimizer: greedy (local)")
-        greedy_local_min_cost(operations)
+    logger.info("optimizer: beam (global)")
+    beam_global_min_cost(operations)
