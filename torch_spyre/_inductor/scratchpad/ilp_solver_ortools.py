@@ -302,16 +302,9 @@ class _CoreDivisionBufferWithCpVars(_LifetimeBufferWithCpVars[CoreDivisionBuffer
         # optimum) this is smallest when the split is spread across more axes
         # with smaller factors, so minimizing it favours a balanced division
         # over one that hammers a single axis (e.g. 2x2 over 4x1, both four
-        # cores). The two split namespaces are coeff-keyed and iterated
-        # separately -- a union would silently drop a factor whose coeff
-        # collides across the two.
+        # cores).
         core_cost = [
-            sum(
-                split**2
-                for split in list(cd.output_splits.values())
-                + list(cd.reduction_splits.values())
-            )
-            for cd in b.core_divisions
+            sum(split**2 for split in cd.splits.values()) for cd in b.core_divisions
         ]
         self.division = m.new_int_var(0, len(b.core_divisions) - 1, f"div_{b.name}")
         self.eff_size = m.new_int_var(0, max(per_core), f"eff_size_{b.name}")
@@ -319,19 +312,15 @@ class _CoreDivisionBufferWithCpVars(_LifetimeBufferWithCpVars[CoreDivisionBuffer
         self.cores = m.new_int_var(min(cores_used), max(cores_used), f"occ_{b.name}")
         self.cores_used = cores_used
 
-        sym_core_divs = b.sym_core_divs
-
-        cp_core_divs = ({}, {})
-        cp_core_divs_raw = ({}, {})
-        for i, split_type in enumerate(["output_splits", "reduction_splits"]):
-            splits = sym_core_divs[i]
-            for key, symbol in splits.items():
-                assert isinstance(symbol, sympy.Symbol)
-                raw = [getattr(cd, split_type).get(key, 1) for cd in b.core_divisions]
-                cp_var = m.new_int_var(1, config.sencores, f"{symbol.name}")
-                m.add_element(self.division, raw, cp_var)
-                cp_core_divs[i][key] = cp_var
-                cp_core_divs_raw[i][key] = raw
+        cp_core_divs: dict = {}
+        cp_core_divs_raw: dict = {}
+        for key, symbol in b.sym_core_divs.items():
+            assert isinstance(symbol, sympy.Symbol)
+            raw = [cd.splits.get(key, 1) for cd in b.core_divisions]
+            cp_var = m.new_int_var(1, config.sencores, f"{symbol.name}")
+            m.add_element(self.division, raw, cp_var)
+            cp_core_divs[key] = cp_var
+            cp_core_divs_raw[key] = raw
 
         self.cp_core_divs = cp_core_divs
         self.cp_core_divs_raw = cp_core_divs_raw
@@ -466,9 +455,7 @@ class _SympyExprToCpSat(Printer):
 
     @staticmethod
     def _is_split_sym(expr):
-        return expr.is_Symbol and expr.name.startswith(
-            ("output_split_", "reduction_split_")
-        )
+        return expr.is_Symbol and expr.name.startswith("split_")
 
     def _inv_log_sym(self, expr):
         # replaces log(sym) with log2_sym and 1/sym with inv_sym
@@ -975,19 +962,13 @@ class CpSatLayoutSolver(CoreDivisionLayoutSolver):
         buffer_map = {}
         for t in tensors.values():
             sym_map[t.buffer.sym_is_lx.name] = t.in_buffer
-            sym_core_divs = t.buffer.sym_core_divs
 
             product = []
-            for splits, cp_splits, cp_splits_raw in zip(
-                sym_core_divs,
-                t.cp_core_divs,
-                t.cp_core_divs_raw,
-            ):
-                for key, symbol in splits.items():
-                    assert isinstance(symbol, sympy.Symbol)
-                    sym_map[symbol.name] = cp_splits[key]
-                    buffer_map[symbol.name] = (t, cp_splits_raw[key])
-                    product.append(symbol.name)
+            for key, symbol in t.buffer.sym_core_divs.items():
+                assert isinstance(symbol, sympy.Symbol)
+                sym_map[symbol.name] = t.cp_core_divs[key]
+                buffer_map[symbol.name] = (t, t.cp_core_divs_raw[key])
+                product.append(symbol.name)
             product.sort()
             symbol = sympy.Symbol("_product_" + "_".join(product))
             sym_map[symbol.name] = t.cores

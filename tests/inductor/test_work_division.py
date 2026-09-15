@@ -1466,8 +1466,10 @@ class TestResidencyEdgeMatching(unittest.TestCase):
         self.view_wide = _physical_view((0, 2), (1, 2))
 
         def _div(splits, reduction=None):
+            output = dict(splits)
+            reduction = dict(reduction or {})
             return CoreDivision(
-                output_splits=dict(splits), reduction_splits=dict(reduction or {})
+                splits={**output, **reduction}, reduction_syms=frozenset(reduction)
             )
 
         # Consumer: a 4-core slicing, a 2-core one, an 8-core one that slices
@@ -1551,15 +1553,15 @@ class TestResidencyEdgeMatching(unittest.TestCase):
         op.get_name.return_value = name
         return op
 
-    def _view_for_div(self, op, dep, buf_name, division, prep_cache):
+    def _view_for_div(self, op, dep, buf_name, splits, prep_cache):
         name = op.get_name()
         if name == "consumer":
-            index = self.consumer_divs.index(division)
+            index = [cd.splits for cd in self.consumer_divs].index(splits)
             return (self.consumer_views[index], False, True)
         views, partial, repr_ok, _matmul = self.parents.get(
             name, ([self.view_a, self.view_b], [False, False], [True, True], False)
         )
-        index = self.parent_divs.index(division)
+        index = [cd.splits for cd in self.parent_divs].index(splits)
         return (views[index], partial[index], repr_ok[index])
 
     def _patches(self):
@@ -1617,6 +1619,18 @@ class TestResidencyEdgeMatching(unittest.TestCase):
             },
         )
 
+    @staticmethod
+    def _compatible(edge, parent_div, consumer_div):
+        """Per-pair reimplementation of what ``match_pairs`` computes in
+        batch, exercised against the same splits-dict API."""
+        if edge._cores_used(parent_div.splits) != edge._cores_used(consumer_div.splits):
+            return False
+        parent_view = edge.parent_view(parent_div.splits)
+        if parent_view is None:
+            return False
+        consumer_view = edge.consumer_view(consumer_div.splits)
+        return consumer_view is not None and parent_view.same_partition(consumer_view)
+
     def test_compatible_agrees_with_the_table(self):
         allocator = CoOptimizingAllocator(MagicMock(), size=1)
         with self._patches():
@@ -1633,7 +1647,7 @@ class TestResidencyEdgeMatching(unittest.TestCase):
                 for i, parent_div in enumerate(self.parent_divs):
                     for j, consumer_div in enumerate(self.consumer_divs):
                         self.assertEqual(
-                            edge.compatible(parent_div, consumer_div),
+                            self._compatible(edge, parent_div, consumer_div),
                             (i, j) in pairs,
                             f"{parent} ({i}, {j})",
                         )
@@ -1690,10 +1704,6 @@ class TestCoOptimizingAllocator(unittest.TestCase):
                 return_value=fixed,
             ),
             patch(
-                "torch_spyre._inductor.scratchpad.allocator._division_splits",
-                return_value={},
-            ),
-            patch(
                 "torch_spyre._inductor.scratchpad.allocator._split_option_is_legal",
                 return_value=False,
             ),
@@ -1745,9 +1755,7 @@ class TestCoOptimizingAllocator(unittest.TestCase):
         ):
             divisions = allocator._division_map(graph)[op.name]
 
-        self.assertEqual(
-            divisions, [CoreDivision(output_splits={m: 8}, reduction_splits={})]
-        )
+        self.assertEqual(divisions, [CoreDivision(splits={m: 8})])
         self.assertEqual(is_legal.call_args_list[0].args[1], safe)
         self.assertEqual(is_legal.call_args_list[1].args[1], unsafe)
 
@@ -1757,17 +1765,11 @@ class TestCoOptimizingAllocator(unittest.TestCase):
                 name=op.name,
                 size=128,
                 uses=[0],
-                core_divisions=[
-                    CoreDivision(output_splits={batch: 4}, reduction_splits={})
-                ],
+                core_divisions=[CoreDivision(splits={batch: 4})],
                 chosen_division=0,
             )
         ]
         with (
-            patch(
-                "torch_spyre._inductor.scratchpad.allocator._division_splits",
-                return_value={batch: 4},
-            ),
             patch(
                 "torch_spyre._inductor.scratchpad.allocator._split_option_is_legal",
                 return_value=False,
@@ -1785,7 +1787,7 @@ class TestCoOptimizingAllocator(unittest.TestCase):
         rw.reads = []
         allocator = CoOptimizingAllocator(MagicMock(), size=1)
 
-        fixed = CoreDivision(output_splits={1: 2}, reduction_splits={})
+        fixed = CoreDivision(splits={1: 2})
         with (
             patch(
                 "torch_spyre._inductor.scratchpad.allocator.op_read_writes",
@@ -1794,10 +1796,6 @@ class TestCoOptimizingAllocator(unittest.TestCase):
             patch(
                 "torch_spyre._inductor.scratchpad.allocator._fixed_core_division",
                 return_value=fixed,
-            ),
-            patch(
-                "torch_spyre._inductor.scratchpad.allocator._division_splits",
-                return_value={},
             ),
             patch(
                 "torch_spyre._inductor.scratchpad.allocator."

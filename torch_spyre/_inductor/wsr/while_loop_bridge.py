@@ -28,6 +28,8 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ..errors import Unsupported
+
 if TYPE_CHECKING:
     from torch._inductor import ir
     from torch._inductor.graph import GraphLowering
@@ -410,6 +412,15 @@ def _extra_readers_of_placeholder(
     confirmed to correctly surface both read shapes (named ops.load calls
     and DynamicScalar/ExternKernelOut's direct object-reference inputs)
     uniformly for every op kind seen in every fixture so far.
+
+    get_read_writes() is not guaranteed to succeed for every Operation
+    subclass that can appear in a spliced while-loop body -- e.g.
+    ComputedBuffer's implementation traces inner_fn symbolically via
+    extract_read_writes(), which can raise for reasons that are hard to
+    enumerate exhaustively (unhandled ops, symbolic-shape edge cases). A
+    failure here means this function cannot determine whether op reads
+    placeholder_name, so treating it as "no read" would risk silently
+    missing a real write-after-read hazard. Raise instead of guessing.
     """
 
     def _matches_body_output(op: "ir.Operation") -> bool:
@@ -433,13 +444,12 @@ def _extra_readers_of_placeholder(
         op_name = getattr(op, "get_operation_name", lambda: None)()
         try:
             rw = op.get_read_writes()
-        except Exception as e:  # noqa: BLE001 -- best-effort; see docstring
-            logger.debug(
-                "_extra_readers_of_placeholder: get_read_writes() raised for %s: %s",
-                op_name,
-                e,
-            )
-            continue
+        except Exception as e:
+            raise Unsupported(
+                "_extra_readers_of_placeholder: get_read_writes() raised for"
+                f" {op_name}, so the write-after-read hazard check for"
+                f" placeholder {placeholder_name!r} cannot be completed: {e}"
+            ) from e
         read_names = {getattr(d, "name", None) for d in rw.reads}
         if placeholder_name in read_names:
             extra_readers.append(op)

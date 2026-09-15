@@ -321,6 +321,33 @@ class TestSpliceWhileLoop(unittest.TestCase):
 
         self.assertEqual(extra_readers, [])
 
+    def test_get_read_writes_failure_raises_unsupported(self):
+        """A post-producer op whose get_read_writes() raises must not be
+        silently treated as "doesn't read the placeholder" -- that could
+        mask a real write-after-read hazard. See Unsupported's use here.
+        """
+        import torch_spyre._inductor.wsr.while_loop_bridge as bridge
+        from torch_spyre._inductor.errors import Unsupported
+
+        producer = mock.Mock(name="producer", spec=["get_operation_name", "get_name"])
+        producer.get_operation_name.return_value = "producer"
+        producer.get_name.return_value = "while_loop_body_graph_0_0_buf7"
+
+        broken_reader = mock.Mock(
+            name="broken_reader",
+            spec=["get_operation_name", "get_name", "get_read_writes"],
+        )
+        broken_reader.get_operation_name.return_value = "broken_reader"
+        broken_reader.get_name.return_value = None
+        broken_reader.get_read_writes.side_effect = RuntimeError("boom")
+
+        with self.assertRaises(Unsupported):
+            bridge._extra_readers_of_placeholder(
+                "while_loop_body_graph_0_0_arg0_1",
+                "while_loop_body_graph_0_0_buf7",
+                [producer, broken_reader],
+            )
+
 
 def _find_while_loop_ir_op(fn, args):
     """Compile fn(*args) under GraphLowering and return the WhileLoop ir.Operation.
