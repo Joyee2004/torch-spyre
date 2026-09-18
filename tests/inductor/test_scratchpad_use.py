@@ -26,13 +26,22 @@ import torch
 
 from torch._inductor import config as t_inductor_config
 from torch._inductor.graph import GraphLowering
-from torch._inductor.ir import MutationLayoutSHOULDREMOVE
+from torch._inductor.ir import (
+    ComputedBuffer,
+    FixedLayout,
+    MutationLayoutSHOULDREMOVE,
+    Pointwise,
+    ReinterpretView,
+    StorageBox,
+    TensorBox,
+)
 
 from torch_spyre._inductor.passes import CustomPreSchedulingPasses
 from torch_spyre._inductor import passes
 from torch_spyre._inductor import config as ts_inductor_config
 from torch_spyre._inductor.pass_utils import op_read_writes
 from torch_spyre._inductor.patches import enable_spyre_context
+from torch_spyre._inductor.scratchpad.graph_editor import GraphEditor
 from torch_spyre._inductor.scratchpad.utils import calculate_liveness
 
 try:
@@ -51,6 +60,47 @@ Ts = TypeVarTuple("Ts")
 # where each split list is a sorted tuple of (iteration_space_stride, factor).
 _Splits = tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]
 _AllocEntry = tuple[str, int, _Splits]
+
+
+def _graph_editor_test_buffer(name: str) -> ComputedBuffer:
+    device = torch.device("spyre")
+    return ComputedBuffer(
+        name=name,
+        layout=FixedLayout(device, torch.float16, [2, 3]),
+        data=Pointwise(
+            device=device,
+            dtype=torch.float16,
+            inner_fn=lambda _i0, _i1: 0,
+            ranges=[2, 3],
+        ),
+    )
+
+
+def test_change_graph_output_skips_unrelated_view_and_preserves_matching_view():
+    old = _graph_editor_test_buffer("old")
+    new = _graph_editor_test_buffer("new")
+    unrelated = _graph_editor_test_buffer("unrelated")
+    view_layout = FixedLayout(
+        torch.device("spyre"), torch.float16, [3, 2], [1, 3], offset=1
+    )
+    view = ReinterpretView(data=StorageBox(old), layout=view_layout)
+    output = TensorBox(StorageBox(view))
+    unrelated_view = ReinterpretView(
+        data=StorageBox(unrelated), layout=unrelated.layout
+    )
+    unrelated_output = TensorBox(StorageBox(unrelated_view))
+    lowering = SimpleNamespace(graph_outputs=[unrelated_output, output])
+    editor = object.__new__(GraphEditor)
+    editor.lowering = lowering
+
+    editor.change_graph_output(old, new)
+
+    assert lowering.graph_outputs[0] is unrelated_output
+    assert unrelated_view.data.data is unrelated
+    assert lowering.graph_outputs[1] is output
+    assert output.data.data is view
+    assert view.layout is view_layout
+    assert view.data.data is new
 
 
 def test_nested_spyre_context_runs_pre_scheduling_once():
@@ -536,31 +586,6 @@ class TestCloneAtGraphBoundaries(
     directly.
     """
 
-    # Solvers that ``select_allocator`` drives with the symbolic cost expression.
-    # The rest reach CoOptimizingAllocator too, but wrapped in
-    # ExhaustiveSearchSolver, which enumerates divisions instead of building that
-    # expression -- so the graph-boundary charge never reaches them and they still
-    # clone. (Without ortools ``cpsat`` takes the enumerating path as well; the
-    # cost of over-skipping there is this one assertion.)
-    _COST_MODEL_SOLVERS = frozenset({"cpsat", "simulated_annealing"})
-
-    def assert_input_clone_added(self, n_ops_no_lx, n_ops_with_lx, msg):
-        """Assert LX planning inserted the graph-input clone -- except where the cost
-        model is what decides, and prices it at exactly zero.
-
-        Every model here reads ``x`` from a single bundle, where ``_fused_hbm_bytes``
-        already counts that load once and the graph-boundary charge (#4271) keeps it
-        whether or not ``x`` is resident. The clone therefore moves no bytes, and a
-        co-optimizer that scores it is free to skip it. What must hold either way --
-        LX is still used, the numbers are still right -- each model asserts for itself.
-        """
-        if (
-            ts_inductor_config.co_optimizing_lx_planning
-            and ts_inductor_config.layout_solver in self._COST_MODEL_SOLVERS
-        ):
-            return
-        self.assertGreater(n_ops_with_lx, n_ops_no_lx, msg)
-
     def _input_clone_when_read_by_multiple_ops(self):
         """A graph input read by two different ops is cloned; the clone lands in LX."""
         x = self.rand_device((64, 1024))
@@ -577,9 +602,9 @@ class TestCloneAtGraphBoundaries(
             n_ops_no_lx,
             mem_usages_no_lx,
         ):
-            self.assert_input_clone_added(
-                n_ops_no_lx,
+            self.assertGreater(
                 n_ops_with_lx,
+                n_ops_no_lx,
                 f"Expected the input clone to add an op: {n_ops_no_lx} ops without LX, "
                 f"{n_ops_with_lx} with LX",
             )
@@ -697,9 +722,9 @@ class TestCloneAtGraphBoundaries(
             n_ops_no_lx,
             mem_usages_no_lx,
         ):
-            self.assert_input_clone_added(
-                n_ops_no_lx,
+            self.assertGreater(
                 n_ops_with_lx,
+                n_ops_no_lx,
                 "Expected a boundary clone for the reduction-fed input, but the op "
                 f"count did not grow ({n_ops_no_lx} -> {n_ops_with_lx})",
             )
