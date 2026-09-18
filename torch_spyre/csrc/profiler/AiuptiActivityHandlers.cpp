@@ -247,7 +247,7 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   // only; the timeline name stays the plain cbid name so grouping and the correlateRuntimeOps_
   // lookup above are unaffected.
   for (const auto& [key, value] : parseActivityAttributes(
-           activity->attributes, sizeof(activity->attributes))) {
+           activity->attributes.data(), activity->attributes.size())) {
     if (value.empty()) {
       continue;
     }
