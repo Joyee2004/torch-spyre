@@ -262,6 +262,12 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuDmaIExec";
     case AIUPTI_RUNTIME_TRACE_CBID_DMAO_EXEC:
       return "aiuDmaOExec";
+    case AIUPTI_RUNTIME_TRACE_CBID_CMPT_EXEC_BEGIN:
+      return "aiuCmptExecBegin";
+    case AIUPTI_RUNTIME_TRACE_CBID_DMAI_EXEC_BEGIN:
+      return "aiuDmaIExecBegin";
+    case AIUPTI_RUNTIME_TRACE_CBID_DMAO_EXEC_BEGIN:
+      return "aiuDmaOExecBegin";
     default:
       break;
   }
@@ -327,7 +333,7 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   // only; the timeline name stays the plain cbid name so grouping and the correlateRuntimeOps_
   // lookup above are unaffected.
   for (const auto& [key, value] : parseActivityAttributes(
-           activity->attributes, sizeof(activity->attributes))) {
+           activity->attributes.data(), activity->attributes.size())) {
     if (value.empty()) {
       continue;
     }
