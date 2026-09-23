@@ -258,6 +258,14 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuRoundtrip";
     case AIUPTI_RUNTIME_TRACE_CBID_WAIT_FOR_QUEUE_CAPACITY:
       return "aiuWaitForQueueCapacity";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_DMA:
+      return "aiuptiSubmitDMA";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_COMPUTE:
+      return "aiuptiSubmitCompute";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_FILL:
+      return "aiuptiSubmitFill";
+    case AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER:
+      return "aiuptiIssueBarrier";
     default:
       break;
   }
