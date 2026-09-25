@@ -2234,6 +2234,21 @@ class TestCoarseTile(unittest.TestCase):
                 _graph([op_known]), [([op_unknown], [(0, Integer(2))])]
             )
 
+    def test_refuses_to_overwrite_existing_loop_info(self):
+        """An op that already carries loop_info -- a for_each_tile loop, say --
+        is not re-tiled: coarse_tile raises rather than replace the record."""
+        gm = fx.symbolic_trace(lambda: None)
+        with V.set_graph_handler(GraphLowering(gm)):
+            tiled_op, _, operations = _make_full_buffer_read_fixture()
+            before = tiled_op.loop_info
+            self.assertIsNotNone(before)
+
+            groups = [([tiled_op], [(0, Integer(8))])]
+            with self.assertRaises(Unsupported) as ctx:
+                coarse_tile_post_stickify(_graph(operations), groups)
+            self.assertIn("would overwrite the existing loop_info", str(ctx.exception))
+            self.assertIs(tiled_op.loop_info, before)
+
     def test_post_stickify_skips_pass_1(self):
         """coarse_tile_post_stickify must skip both planning and execution
         of Pass 1 -- a full-buffer boundary read stays a direct read of the
@@ -2247,6 +2262,9 @@ class TestCoarseTile(unittest.TestCase):
             tiled_op, full_deps, operations = _make_full_buffer_read_fixture()
             self.assertEqual(len(full_deps), 1)
             full_buf_name = full_deps[0].name
+            # The fixture pre-stamps loop_info for the read-copy tests; here
+            # coarse_tile does the stamping, and refuses to overwrite a stamp.
+            tiled_op.loop_info = None
 
             groups = [([tiled_op], [(0, Integer(8))])]
             coarse_tile_post_stickify(_graph(operations), groups)
