@@ -15,6 +15,7 @@
  *
  * Portions derived from libkineto AIU plugin.
  */
+#include <c10/util/Logging.h>
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <nlohmann/json.hpp>
@@ -312,6 +313,19 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   // them; anything else is quoted.
   const auto meta_count = std::min<size_t>(activity->meta.count,
                                            AIUPTI_ACTIVITY_MAX_META_ENTRIES);
+  if (meta_count > 0 ||
+      activity->cbid == AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER) {
+    std::string entries;
+    for (size_t i = 0; i < meta_count; ++i) {
+      const auto& e = activity->meta.entries[i];
+      entries += (i ? ", " : "");
+      entries += std::string(e.key, strnlen(e.key, sizeof(e.key))) + "=" +
+                 std::string(e.val, strnlen(e.val, sizeof(e.val)));
+    }
+    VLOG(1) << "Aiupti: [meta trace] " << cbIDName
+            << " corr=" << activity->correlation_id
+            << " meta_count=" << meta_count << " {" << entries << "}";
+  }
   for (size_t i = 0; i < meta_count; ++i) {
     const auto& entry = activity->meta.entries[i];
     const std::string key(entry.key, strnlen(entry.key, sizeof(entry.key)));
