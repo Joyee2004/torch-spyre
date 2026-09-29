@@ -20,7 +20,6 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -304,37 +303,60 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
   // Extensible producer metadata (e.g. ISSUE_BARRIER: stream_id, fence_size).
-  // Numeric values are emitted as JSON numbers so trace tools can aggregate on
-  // them; anything else is quoted.
+  // Values arrive typed, so numbers are emitted as JSON numbers directly (no
+  // parsing) and strings are quoted.
   const auto meta_count = std::min<size_t>(activity->meta.count,
                                            AIUPTI_ACTIVITY_MAX_META_ENTRIES);
-  if (meta_count > 0 ||
-      activity->cbid == AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER) {
+  for (size_t i = 0; i < meta_count; ++i) {
+    const auto& e = activity->meta.entries[i];
+    const char* known = aiuptiActivityMetaKeyName(e.key);
+    const std::string key = (std::strcmp(known, "unknown") != 0)
+        ? std::string(known)
+        : "meta_" + std::to_string(e.key);
+    switch (e.type) {
+      case AIUPTI_ACTIVITY_META_TYPE_U64:
+        runtime_activity->addMetadata(key, e.value.u64);
+        break;
+      case AIUPTI_ACTIVITY_META_TYPE_I64:
+        runtime_activity->addMetadata(key, e.value.i64);
+        break;
+      case AIUPTI_ACTIVITY_META_TYPE_F64:
+        runtime_activity->addMetadata(key, e.value.f64);
+        break;
+      case AIUPTI_ACTIVITY_META_TYPE_STR:
+        runtime_activity->addMetadataQuoted(
+            key, std::string(e.value.str,
+                             std::min<size_t>(e.len,
+                                              AIUPTI_ACTIVITY_META_STR_LEN)));
+        break;
+      default:
+        break;
+    }
+  }
+  // Debug trail for the meta flow; string is only built when VLOG(1) is on.
+  if (VLOG_IS_ON(1) &&
+      (meta_count > 0 ||
+       activity->cbid == AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER)) {
     std::string entries;
     for (size_t i = 0; i < meta_count; ++i) {
       const auto& e = activity->meta.entries[i];
       entries += (i ? ", " : "");
-      entries += std::string(e.key, strnlen(e.key, sizeof(e.key))) + "=" +
-                 std::string(e.val, strnlen(e.val, sizeof(e.val)));
+      entries += aiuptiActivityMetaKeyName(e.key);
+      entries += "=";
+      if (e.type == AIUPTI_ACTIVITY_META_TYPE_U64) {
+        entries += std::to_string(e.value.u64);
+      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_I64) {
+        entries += std::to_string(e.value.i64);
+      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_F64) {
+        entries += std::to_string(e.value.f64);
+      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_STR) {
+        entries.append(e.value.str,
+                       std::min<size_t>(e.len, AIUPTI_ACTIVITY_META_STR_LEN));
+      }
     }
     VLOG(1) << "Aiupti: [meta trace] " << cbIDName
             << " corr=" << activity->correlation_id
             << " meta_count=" << meta_count << " {" << entries << "}";
-  }
-  for (size_t i = 0; i < meta_count; ++i) {
-    const auto& entry = activity->meta.entries[i];
-    const std::string key(entry.key, strnlen(entry.key, sizeof(entry.key)));
-    const std::string val(entry.val, strnlen(entry.val, sizeof(entry.val)));
-    if (key.empty() || val.empty()) {
-      continue;
-    }
-    char* parse_end = nullptr;
-    const unsigned long long num = std::strtoull(val.c_str(), &parse_end, 10);
-    if (parse_end != val.c_str() && *parse_end == '\0') {
-      runtime_activity->addMetadata(key, num);
-    } else {
-      runtime_activity->addMetadataQuoted(key, val);
-    }
   }
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
