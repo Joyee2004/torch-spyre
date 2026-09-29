@@ -18,6 +18,9 @@
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -299,6 +302,26 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                 cbIDName) != correlateRuntimeOps_.end());
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
+  // Extensible producer metadata (e.g. ISSUE_BARRIER: stream_id, fence_size).
+  // Numeric values are emitted as JSON numbers so trace tools can aggregate on
+  // them; anything else is quoted.
+  const auto meta_count = std::min<size_t>(activity->meta.count,
+                                           AIUPTI_ACTIVITY_MAX_META_ENTRIES);
+  for (size_t i = 0; i < meta_count; ++i) {
+    const auto& entry = activity->meta.entries[i];
+    const std::string key(entry.key, strnlen(entry.key, sizeof(entry.key)));
+    const std::string val(entry.val, strnlen(entry.val, sizeof(entry.val)));
+    if (key.empty() || val.empty()) {
+      continue;
+    }
+    char* parse_end = nullptr;
+    const unsigned long long num = std::strtoull(val.c_str(), &parse_end, 10);
+    if (parse_end != val.c_str() && *parse_end == '\0') {
+      runtime_activity->addMetadata(key, num);
+    } else {
+      runtime_activity->addMetadataQuoted(key, val);
+    }
+  }
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
     case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB:
