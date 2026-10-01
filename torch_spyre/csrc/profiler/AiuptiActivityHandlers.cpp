@@ -15,12 +15,10 @@
  *
  * Portions derived from libkineto AIU plugin.
  */
-#include <c10/util/Logging.h>
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
-#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -309,8 +307,8 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                                            AIUPTI_ACTIVITY_MAX_META_ENTRIES);
   for (size_t i = 0; i < meta_count; ++i) {
     const auto& e = activity->meta.entries[i];
-    const char* known = aiuptiActivityMetaKeyName(e.key);
-    const std::string key = (std::strcmp(known, "unknown") != 0)
+    const char* known = aiuptiActivityMetaKeyName(e.key);  // nullptr if unknown
+    const std::string key = (known != nullptr)
         ? std::string(known)
         : "meta_" + std::to_string(e.key);
     switch (e.type) {
@@ -332,31 +330,6 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
       default:
         break;
     }
-  }
-  // Debug trail for the meta flow; string is only built when VLOG(1) is on.
-  if (VLOG_IS_ON(1) &&
-      (meta_count > 0 ||
-       activity->cbid == AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER)) {
-    std::string entries;
-    for (size_t i = 0; i < meta_count; ++i) {
-      const auto& e = activity->meta.entries[i];
-      entries += (i ? ", " : "");
-      entries += aiuptiActivityMetaKeyName(e.key);
-      entries += "=";
-      if (e.type == AIUPTI_ACTIVITY_META_TYPE_U64) {
-        entries += std::to_string(e.value.u64);
-      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_I64) {
-        entries += std::to_string(e.value.i64);
-      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_F64) {
-        entries += std::to_string(e.value.f64);
-      } else if (e.type == AIUPTI_ACTIVITY_META_TYPE_STR) {
-        entries.append(e.value.str,
-                       std::min<size_t>(e.len, AIUPTI_ACTIVITY_META_STR_LEN));
-      }
-    }
-    VLOG(1) << "Aiupti: [meta trace] " << cbIDName
-            << " corr=" << activity->correlation_id
-            << " meta_count=" << meta_count << " {" << entries << "}";
   }
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
