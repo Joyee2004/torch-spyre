@@ -496,6 +496,11 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
       runtime_activity->addMetadata("bytes", activity->data);
       break;
 
+    case AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER:
+      runtime_activity->addMetadata("fence_size", activity->data);
+      runtime_activity->addMetadata("stream_id", activity->stream_id);
+      break;
+
     default:
       break;
   }
