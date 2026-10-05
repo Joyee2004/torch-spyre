@@ -322,6 +322,11 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
       runtime_activity->addMetadata("bytes", activity->data);
       break;
 
+    case AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER:
+      runtime_activity->addMetadata("n_dmai", activity->n_dmai);
+      runtime_activity->addMetadata("n_dmao", activity->n_dmao);
+      break;
+
     default:
       break;
   }
