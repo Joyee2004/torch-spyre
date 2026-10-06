@@ -305,7 +305,7 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                 cbIDName) != correlateRuntimeOps_.end());
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
-  // Extensible producer metadata (e.g. ISSUE_BARRIER: stream_id, fence_size).
+  // Extensible producer metadata (e.g. ISSUE_BARRIER: n_dmai, n_dmao).
   // Values arrive typed, so numbers are emitted as JSON numbers directly (no
   // parsing) and strings are quoted.
   const auto meta_count = std::min<size_t>(activity->meta.count,
@@ -317,14 +317,14 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
         ? std::string(known)
         : "meta_" + std::to_string(e.key);
     switch (e.type) {
-      case AIUPTI_ACTIVITY_META_TYPE_U64:
-        runtime_activity->addMetadata(key, e.value.u64);
+      case AIUPTI_ACTIVITY_META_TYPE_U32:
+        runtime_activity->addMetadata(key, e.value.u32);
         break;
-      case AIUPTI_ACTIVITY_META_TYPE_I64:
-        runtime_activity->addMetadata(key, e.value.i64);
+      case AIUPTI_ACTIVITY_META_TYPE_I32:
+        runtime_activity->addMetadata(key, e.value.i32);
         break;
-      case AIUPTI_ACTIVITY_META_TYPE_F64:
-        runtime_activity->addMetadata(key, e.value.f64);
+      case AIUPTI_ACTIVITY_META_TYPE_F32:
+        runtime_activity->addMetadata(key, e.value.f32);
         break;
       case AIUPTI_ACTIVITY_META_TYPE_STR:
         runtime_activity->addMetadataQuoted(
