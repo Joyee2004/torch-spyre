@@ -17,8 +17,8 @@
  */
 #include <libaiupti/aiupti_runtime_cbid.h>
 
-#include <nlohmann/json.hpp>
 #include <cstring>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -294,6 +294,29 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
   return "Unknown CBID " + std::to_string(cbid);
 }
 
+// Collective-communication metadata, when the producer set any. Emitted as
+// trace args only, so activity names and grouping are unaffected. The first
+// byte is checked before building a string because most records carry none.
+template <class trace_activity_type, class aiupti_activity_type>
+inline void addCollMetadata(trace_activity_type& trace_activity,
+                            const aiupti_activity_type* activity) {
+  if (activity->coll_group[0] != '\0') {
+    trace_activity->addMetadataQuoted(
+        "coll_group", std::string(activity->coll_group,
+                                  strnlen(activity->coll_group,
+                                          sizeof(activity->coll_group))));
+  }
+  if (activity->coll_algo[0] != '\0') {
+    trace_activity->addMetadataQuoted(
+        "coll_algo",
+        std::string(activity->coll_algo,
+                    strnlen(activity->coll_algo, sizeof(activity->coll_algo))));
+  }
+  if (activity->coll_bytes != 0) {
+    trace_activity->addMetadata("coll_bytes", activity->coll_bytes);
+  }
+}
+
 void AiuptiActivityProfilerSession::handleRuntimeActivity(
     const AIUpti_ActivityAPI* activity, libkineto::ActivityLogger* logger) {
   traceBuffer_.span.opCount += 1;
@@ -326,22 +349,7 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                 cbIDName) != correlateRuntimeOps_.end());
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
-  // Collective-communication metadata, when the producer set any. Emitted as trace args only
-  const std::string coll_group(
-      activity->coll_group,
-      strnlen(activity->coll_group, sizeof(activity->coll_group)));
-  const std::string coll_algo(
-      activity->coll_algo,
-      strnlen(activity->coll_algo, sizeof(activity->coll_algo)));
-  if (!coll_group.empty()) {
-    runtime_activity->addMetadataQuoted("coll_group", coll_group);
-  }
-  if (!coll_algo.empty()) {
-    runtime_activity->addMetadataQuoted("coll_algo", coll_algo);
-  }
-  if (activity->coll_bytes != 0) {
-    runtime_activity->addMetadata("coll_bytes", activity->coll_bytes);
-  }
+  addCollMetadata(runtime_activity, activity);
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
     case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB:
@@ -403,6 +411,7 @@ void AiuptiActivityProfilerSession::handleKernelActivity(
   kernel_activity->addMetadataQuoted("context",
                                      std::to_string(activity->context_id));
   kernel_activity->addMetadata("correlation", activity->correlation_id);
+  addCollMetadata(kernel_activity, activity);
   if (const auto key = spyre::extractKernelProvenanceKey(activity->name)) {
     kernel_activity->addMetadataQuoted("provenance_key", *key);
     if (const auto ids = spyre::lookupKernelProvenance(*key)) {
@@ -535,6 +544,7 @@ void AiuptiActivityProfilerSession::handleMemcpyActivity(
   if (hasCyclesTs(activity)) {
     memcpy_activity->addMetadata("cycles_ts", cyclesTsJson(activity));
   }
+  addCollMetadata(memcpy_activity, activity);
 
   if (memcpy_activity->resource == getBaseResourceId(activity)) {
     recordMemoryStream(memcpy_activity->device, memcpy_activity->resource,
