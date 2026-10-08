@@ -18,7 +18,6 @@
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <nlohmann/json.hpp>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -295,30 +294,6 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
   return "Unknown CBID " + std::to_string(cbid);
 }
 
-static std::vector<std::pair<std::string, std::string>> parseActivityAttributes(
-    const char* attributes, size_t capacity) {
-  std::vector<std::pair<std::string, std::string>> parsed;
-  if (attributes == nullptr) {
-    return parsed;
-  }
-  const std::string field(attributes, strnlen(attributes, capacity));
-  size_t pos = 0;
-  while (pos < field.size()) {
-    const size_t sep = field.find(';', pos);
-    const size_t end = (sep == std::string::npos) ? field.size() : sep;
-    const std::string entry = field.substr(pos, end - pos);
-    const size_t eq = entry.find('=');
-    if (eq != std::string::npos && eq > 0) {
-      parsed.emplace_back(entry.substr(0, eq), entry.substr(eq + 1));
-    }
-    if (sep == std::string::npos) {
-      break;
-    }
-    pos = sep + 1;
-  }
-  return parsed;
-}
-
 void AiuptiActivityProfilerSession::handleRuntimeActivity(
     const AIUpti_ActivityAPI* activity, libkineto::ActivityLogger* logger) {
   traceBuffer_.span.opCount += 1;
@@ -351,29 +326,21 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                 cbIDName) != correlateRuntimeOps_.end());
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
-  // Collective-communication metadata, when the producer attached any. Emitted as trace args
-  // only; the timeline name stays the plain cbid name so grouping and the correlateRuntimeOps_
-  // lookup above are unaffected.
-  for (const auto& [key, value] : parseActivityAttributes(
-           activity->attributes.data(), activity->attributes.size())) {
-    if (value.empty()) {
-      continue;
-    }
-    if (key == "CollGroup") {
-      runtime_activity->addMetadataQuoted("coll_group", value);
-    } else if (key == "CollAlgo") {
-      runtime_activity->addMetadataQuoted("coll_algo", value);
-    } else if (key == "CollBytes") {
-      // Prefer a JSON number so Perfetto and pandas can aggregate on it; fall back to a quoted
-      // string if the producer ever sends something non-numeric.
-      char* parse_end = nullptr;
-      const unsigned long long bytes = std::strtoull(value.c_str(), &parse_end, 10);
-      if (parse_end != nullptr && *parse_end == '\0' && parse_end != value.c_str()) {
-        runtime_activity->addMetadata("coll_bytes", bytes);
-      } else {
-        runtime_activity->addMetadataQuoted("coll_bytes", value);
-      }
-    }
+  // Collective-communication metadata, when the producer set any. Emitted as trace args only
+  const std::string coll_group(
+      activity->coll_group,
+      strnlen(activity->coll_group, sizeof(activity->coll_group)));
+  const std::string coll_algo(
+      activity->coll_algo,
+      strnlen(activity->coll_algo, sizeof(activity->coll_algo)));
+  if (!coll_group.empty()) {
+    runtime_activity->addMetadataQuoted("coll_group", coll_group);
+  }
+  if (!coll_algo.empty()) {
+    runtime_activity->addMetadataQuoted("coll_algo", coll_algo);
+  }
+  if (activity->coll_bytes != 0) {
+    runtime_activity->addMetadata("coll_bytes", activity->coll_bytes);
   }
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
@@ -480,6 +447,7 @@ inline std::string memoryCopyOperationName(uint8_t kind) {
   }
   return "<unknown>";
 }
+
 inline uint32_t getBaseResourceId(const AIUpti_ActivityMemcpy* activity) {
   return activity->copy_kind * 100;
 }
@@ -759,10 +727,10 @@ void AiuptiActivityProfilerSession::handlePtiActivity(
           reinterpret_cast<const AIUpti_ActivityMemory*>(record), logger);
       break;
     default:
-      errors_.push_back("Unexpected activity type: " + std::to_string(record->kind));
+      errors_.push_back("Unexpected activity type: " +
+                        std::to_string(record->kind));
       break;
   }
 }
 
 }  // namespace KINETO_NAMESPACE
-
