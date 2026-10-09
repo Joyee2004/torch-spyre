@@ -282,26 +282,38 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
   return "Unknown CBID " + std::to_string(cbid);
 }
 
+
+template <size_t N>
+inline std::string fixedCharField(const char (&field)[N]) {
+  return std::string(field, strnlen(field, N));
+}
+
 // Collective-communication metadata, when the producer set any. Emitted as
 // trace args only, so activity names and grouping are unaffected. The first
 // byte is checked before building a string because most records carry none.
+//
+// Producer contract (libaiupti AIUpti_ActivityCompute/_ActivityMemcpy): the
+// names are fixed char[AIUPTI_COLL_NAME_SIZE] arrays, empty when not set, and
+// coll_bytes is 0 both for a zero-byte transfer and when unknown. flex fills
+// coll_algo only from a structured "[Coll,Algo,Bytes]" label, whose fields are
+// all required, so a non-empty coll_algo means coll_bytes was really parsed.
+// On collective records coll_bytes is therefore the number when known
+// (including a real 0) and "" when the label carried no size.
 template <class trace_activity_type, class aiupti_activity_type>
 inline void addCollMetadata(trace_activity_type& trace_activity,
                             const aiupti_activity_type* activity) {
   if (activity->coll_group[0] != '\0') {
-    trace_activity->addMetadataQuoted(
-        "coll_group", std::string(activity->coll_group,
-                                  strnlen(activity->coll_group,
-                                          sizeof(activity->coll_group))));
+    trace_activity->addMetadataQuoted("coll_group",
+                                      fixedCharField(activity->coll_group));
   }
   if (activity->coll_algo[0] != '\0') {
-    trace_activity->addMetadataQuoted(
-        "coll_algo",
-        std::string(activity->coll_algo,
-                    strnlen(activity->coll_algo, sizeof(activity->coll_algo))));
+    trace_activity->addMetadataQuoted("coll_algo",
+                                      fixedCharField(activity->coll_algo));
   }
-  if (activity->coll_bytes != 0) {
+  if (activity->coll_bytes != 0 || activity->coll_algo[0] != '\0') {
     trace_activity->addMetadata("coll_bytes", activity->coll_bytes);
+  } else if (activity->coll_group[0] != '\0') {
+    trace_activity->addMetadataQuoted("coll_bytes", "");
   }
 }
 
