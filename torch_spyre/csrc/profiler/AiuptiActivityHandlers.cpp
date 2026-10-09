@@ -276,18 +276,6 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuRoundtrip";
     case AIUPTI_RUNTIME_TRACE_CBID_WAIT_FOR_QUEUE_CAPACITY:
       return "aiuWaitForQueueCapacity";
-    case AIUPTI_RUNTIME_TRACE_CBID_CMPT_EXEC:
-      return "aiuCmptExec";
-    case AIUPTI_RUNTIME_TRACE_CBID_DMAI_EXEC:
-      return "aiuDmaIExec";
-    case AIUPTI_RUNTIME_TRACE_CBID_DMAO_EXEC:
-      return "aiuDmaOExec";
-    case AIUPTI_RUNTIME_TRACE_CBID_CMPT_EXEC_BEGIN:
-      return "aiuCmptExecBegin";
-    case AIUPTI_RUNTIME_TRACE_CBID_DMAI_EXEC_BEGIN:
-      return "aiuDmaIExecBegin";
-    case AIUPTI_RUNTIME_TRACE_CBID_DMAO_EXEC_BEGIN:
-      return "aiuDmaOExecBegin";
     default:
       break;
   }
@@ -349,7 +337,6 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
                 cbIDName) != correlateRuntimeOps_.end());
   runtime_activity->linked = linked;
   runtime_activity->addMetadata("correlation", activity->correlation_id);
-  addCollMetadata(runtime_activity, activity);
 
   switch ((AIUpti_runtime_api_trace_cbid)activity->cbid) {
     case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB:
