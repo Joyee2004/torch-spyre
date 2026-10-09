@@ -338,6 +338,8 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuptiIssueBarrier";
     // flex host-side spans: ResponseWorker (79-82), per-chunk DMA (83), P2P
     // RDMA (84-91).
+    // flex host-side spans: ResponseWorker (79-82), P2P RDMA (84-91), AIU
+    // roundtrip / queue backpressure (92-94). 83 is reserved.
     case AIUPTI_RUNTIME_TRACE_CBID_FETCH_RESPONSE_BLOCKS:
       return "aiuFetchResponseBlocks";
     case AIUPTI_RUNTIME_TRACE_CBID_RESPONSE_COMPLETION_THREAD:
@@ -346,8 +348,6 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuParseResponseBlocks";
     case AIUPTI_RUNTIME_TRACE_CBID_ITERATION_DURATION:
       return "aiuIterationDuration";
-    case AIUPTI_RUNTIME_TRACE_CBID_PROCESS_SINGLE_CHUNK_DMA:
-      return "aiuProcessSingleChunkDma";
     case AIUPTI_RUNTIME_TRACE_CBID_P2P_RDMA_SEND:
       return "aiuP2PRdmaSend";
     case AIUPTI_RUNTIME_TRACE_CBID_P2P_RDMA_MULTICAST:
@@ -364,6 +364,20 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuLaunchP2PRdmaWait";
     case AIUPTI_RUNTIME_TRACE_CBID_INITIALIZE_P2P:
       return "aiuInitializeP2P";
+    case AIUPTI_RUNTIME_TRACE_CBID_AIU_ROUNDTRIP:
+      return "aiuRoundtrip";
+    case AIUPTI_RUNTIME_TRACE_CBID_WAIT_FOR_QUEUE_CAPACITY:
+      return "aiuWaitForQueueCapacity";
+    case AIUPTI_RUNTIME_TRACE_CBID_FLEX_ROUNDTRIP:
+      return "aiuFlexRoundtrip";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_DMA:
+      return "aiuptiSubmitDMA";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_COMPUTE:
+      return "aiuptiSubmitCompute";
+    case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_FILL:
+      return "aiuptiSubmitFill";
+    case AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER:
+      return "aiuptiIssueBarrier";
     default:
       break;
   }
@@ -482,6 +496,29 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
     case AIUPTI_RUNTIME_TRACE_CBID_ISSUE_BARRIER:
       runtime_activity->addMetadata("fence_size", activity->data);
       runtime_activity->addMetadata("stream_id", activity->stream_id);
+      break;
+
+    // flex P2P RDMA (84-91): data meaning per CBID is documented in
+    // libaiupti's aiupti_runtime_cbid.h. return_value is AIUpti_ResultTypes
+    // (0 = success).
+    case AIUPTI_RUNTIME_TRACE_CBID_P2P_RDMA_SEND:
+    case AIUPTI_RUNTIME_TRACE_CBID_P2P_RDMA_MULTICAST:
+      runtime_activity->addMetadata("bytes", activity->data);
+      break;
+
+    case AIUPTI_RUNTIME_TRACE_CBID_P2P_RDMA_WAIT:
+    case AIUPTI_RUNTIME_TRACE_CBID_SCHEDULE_P2P_RDMA_WAIT:
+    case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_P2P_RDMA_WAIT:
+      runtime_activity->addMetadata("num_sids", activity->data);
+      break;
+
+    case AIUPTI_RUNTIME_TRACE_CBID_SCHEDULE_P2P_RDMA_SEND:
+    case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_P2P_RDMA_SEND:
+      runtime_activity->addMetadata("num_dest_ranks", activity->data);
+      break;
+
+    case AIUPTI_RUNTIME_TRACE_CBID_INITIALIZE_P2P:
+      runtime_activity->addMetadata("world_size", activity->data);
       break;
 
     default:
