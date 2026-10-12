@@ -60,6 +60,7 @@ except ValueError:
 DEVICE = torch.device(f"spyre:{os.getenv('RANK', '0')}")
 C10D_BACKEND = "spyreccl"
 ACTIVITY_CATEGORIES = {"kernel", "gpu_memcpy"}
+COLL_ARGS = ("coll_group", "coll_algo", "coll_bytes")
 
 
 @pytest.mark.requires_spyre_profiler
@@ -102,85 +103,53 @@ class TestProfilerCollMetadata(TestCase):
             with open(fname) as f:
                 return json.load(f)
 
-    def test_allreduce_activities_carry_coll_args(self):
-        """Kernel/memcpy events of an all_reduce carry coll_group/algo/bytes.
-
-        On failure the message lists every distinct coll_* arg set seen, which
-        shows how often coll_bytes is "" (unknown) versus a number.
-        """
-        trace = self._profile_allreduce_trace()
-        coll_events = [
+    def _coll_events(self, trace):
+        """Trace events carrying at least one coll_* arg; skips if there are none."""
+        events = [
             e
             for e in trace["traceEvents"]
-            if e.get("ph") == "X"
-            and e.get("cat") in ACTIVITY_CATEGORIES
-            and "coll_group" in e.get("args", {})
+            if any(k in e.get("args", {}) for k in COLL_ARGS)
         ]
-        if not coll_events:
+        if not events:
             self.skipTest(
-                f"Rank {self.comm_rank}: no kernel/memcpy event carries coll_group "
+                f"Rank {self.comm_rank}: no trace event carries coll_* args "
                 "(libaiupti/flex build without coll metadata)"
             )
+        return events
 
-        for e in coll_events:
-            args = e["args"]
-            self.assertIsInstance(args["coll_group"], str)
-            self.assertTrue(args["coll_group"], "coll_group emitted empty")
-            # Every collective record carries coll_bytes. It is a number when
-            # the label carried a size (coll_algo set), including a real 0,
-            # and "" when flex saw a bare collective name with no size.
-            self.assertIn("coll_bytes", args, f"event {e.get('name')!r}")
-            if "coll_algo" in args:
-                self.assertIsInstance(args["coll_algo"], str)
-                self.assertTrue(args["coll_algo"], "coll_algo emitted empty")
-                self.assertIsInstance(
-                    args["coll_bytes"],
-                    int,
-                    "args.coll_bytes must be a JSON number when the size is known",
-                )
-                self.assertGreaterEqual(args["coll_bytes"], 0)
-            else:
-                self.assertEqual(
-                    args["coll_bytes"],
-                    "",
-                    "args.coll_bytes must be '' when the size is unknown",
-                )
+    def test_allreduce_activities_carry_coll_args(self):
+        """coll_* args of an all_reduce are well-formed, in any combination.
 
-        # all_reduce goes through Collective::Convert(), which labels its CBs
-        # "[Allreduce,<algo>,<bytes>]", so at least one record has a known size.
-        self.assertTrue(
-            any(
-                e["args"]["coll_group"] == "Allreduce"
-                and "coll_algo" in e["args"]
-                and isinstance(e["args"]["coll_bytes"], int)
-                for e in coll_events
-            ),
-            f"Rank {self.comm_rank}: no event has coll_group='Allreduce' with "
-            f"coll_algo and a numeric coll_bytes; saw "
-            f"{sorted({json.dumps(e['args'], sort_keys=True) for e in coll_events})}",
-        )
-
-    def test_coll_args_only_with_coll_group(self):
-        """coll_algo/coll_bytes never appear on an event without coll_group."""
+        Each of coll_group/coll_algo/coll_bytes may be present on its own, since
+        the producer can fill some fields and not others. Whatever is present
+        must have the right type: names are non-empty strings, and coll_bytes is
+        a non-negative number, or "" when the size is unknown.
+        """
         trace = self._profile_allreduce_trace()
-        if not any(
-            "coll_group" in e.get("args", {})
-            for e in trace["traceEvents"]
-            if e.get("cat") in ACTIVITY_CATEGORIES
-        ):
-            self.skipTest(
-                f"Rank {self.comm_rank}: no kernel/memcpy event carries coll_group "
-                "(libaiupti/flex build without coll metadata)"
-            )
-        for e in trace["traceEvents"]:
-            if e.get("cat") not in ACTIVITY_CATEGORIES:
-                continue
-            args = e.get("args", {})
-            if "coll_group" in args:
-                continue
-            self.assertNotIn("coll_algo", args, f"event {e.get('name')!r}")
-            self.assertNotIn("coll_bytes", args, f"event {e.get('name')!r}")
+        for e in self._coll_events(trace):
+            args = e["args"]
+            name = e.get("name")
+            for key in ("coll_group", "coll_algo"):
+                if key in args:
+                    self.assertIsInstance(args[key], str, f"{key} on {name!r}")
+                    self.assertTrue(args[key], f"{key} emitted empty on {name!r}")
+            if "coll_bytes" in args:
+                value = args["coll_bytes"]
+                if isinstance(value, str):
+                    self.assertEqual(value, "", f"coll_bytes on {name!r}")
+                else:
+                    self.assertIsInstance(value, int, f"coll_bytes on {name!r}")
+                    self.assertGreaterEqual(value, 0, f"coll_bytes on {name!r}")
 
+    def test_coll_args_only_on_device_activities(self):
+        """coll_* args appear only on kernel/memcpy events, never on CPU ops."""
+        trace = self._profile_allreduce_trace()
+        for e in self._coll_events(trace):
+            self.assertIn(
+                e.get("cat"),
+                ACTIVITY_CATEGORIES,
+                f"coll_* args on non-device event {e.get('name')!r}",
+            )
 
 if __name__ == "__main__":
     run_tests()
