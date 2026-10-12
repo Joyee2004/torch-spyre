@@ -332,7 +332,6 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
   return "Unknown CBID " + std::to_string(cbid);
 }
 
-
 template <size_t N>
 inline std::string fixedCharField(const char (&field)[N]) {
   return std::string(field, strnlen(field, N));
