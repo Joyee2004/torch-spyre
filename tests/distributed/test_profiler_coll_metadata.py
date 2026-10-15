@@ -151,5 +151,6 @@ class TestProfilerCollMetadata(TestCase):
                 f"coll_* args on non-device event {e.get('name')!r}",
             )
 
+
 if __name__ == "__main__":
     run_tests()
