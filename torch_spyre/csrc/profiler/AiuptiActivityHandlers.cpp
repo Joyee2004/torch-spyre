@@ -18,6 +18,7 @@
 #include <libaiupti/aiupti_runtime_cbid.h>
 
 #include <cstring>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <type_traits>
