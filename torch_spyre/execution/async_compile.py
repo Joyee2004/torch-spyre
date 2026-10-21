@@ -577,10 +577,6 @@ class SpyreAsyncCompile(AsyncCompile):
                 use_cache = False
                 logger.debug(
                     "Kernel cache disabled for %s: could not compute cache key: %s",
-                    # LIB_VERSION_FILE missing or unreadable — user-actionable.
-                    # logger.warning(
-                    #    "Kernel cache disabled for %s: could not compute cache key: %s. "
-                    #    "Set SPYRE_KERNEL_CACHE=0 to suppress this warning.",
                     kernel_name,
                     e,
                 )
