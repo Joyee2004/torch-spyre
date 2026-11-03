@@ -177,12 +177,12 @@ The cache key is a SHA-256 hash computed in memory from the finalized specs,
 before any bundle is written, by `compute_specs_hash`
 ([`execution/kernel_cache.py`](https://github.com/torch-spyre/torch-spyre/blob/main/torch_spyre/execution/kernel_cache.py)).
 It covers the JSON of every `sdsc_N.json` (op structure, iteration space,
-tiling, shapes, dtypes), each `LoopSpec` trip count, the baked symbol offsets
-and total pool size, the active compile config, and the versions of torch,
-torch_spyre, and the deeptools/flex toolchain. The toolchain version is read
-from the file named by `LIB_VERSION_FILE`; when that variable is unset the key
-cannot be formed, so caching is disabled for that kernel with a warning (set
-`SPYRE_KERNEL_CACHE=0` to silence it).
+tiling, shapes, dtypes), each `LoopSpec` trip count and loop extent, the
+baked symbol offsets and total pool size, the active compile config, and the
+versions of torch, torch_spyre, and the deeptools/flex toolchain. The
+toolchain version is read from the file named by `LIB_VERSION_FILE`; when that
+variable is unset the key cannot be formed, so caching is disabled for that
+kernel with a warning (set `SPYRE_KERNEL_CACHE=0` to silence it).
 
 On a cache hit, `get_cached_kernel_dir` finds a directory that holds every
 required artifact and the kernel loads directly: neither `generate_bundle` nor
